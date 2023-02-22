@@ -5,7 +5,7 @@ from torch.autograd import Function
 import torch.nn as nn
 
 try:
-    import pointops_cuda
+    import pointops_cuda_repsurf
 except ImportError:
     import warnings
     import os
@@ -13,7 +13,7 @@ except ImportError:
 
     warnings.warn("Unable to load pointops_cuda cpp extension.")
     pointops_cuda_src = os.path.join(os.path.dirname(__file__), "../src")
-    pointops_cuda = load('pointops_cuda', [
+    pointops_cuda_repsurf = load('pointops_cuda_repsurf', [
         pointops_cuda_src + '/pointops_api.cpp',
         pointops_cuda_src + '/ballquery/ballquery_cuda.cpp',
         pointops_cuda_src + '/ballquery/ballquery_cuda_kernel.cu',
@@ -43,7 +43,7 @@ class FurthestSampling(Function):
         b, n, _ = xyz.size()
         idx = torch.cuda.IntTensor(b, m)
         temp = torch.cuda.FloatTensor(b, n).fill_(1e10)
-        pointops_cuda.furthestsampling_cuda(b, n, m, xyz, temp, idx)
+        pointops_cuda_repsurf.furthestsampling_cuda(b, n, m, xyz, temp, idx)
         return idx
 
     @staticmethod
@@ -66,7 +66,7 @@ class Gathering(Function):
         b, c, n = features.size()
         m = idx.size(1)
         output = torch.cuda.FloatTensor(b, c, m)
-        pointops_cuda.gathering_forward_cuda(b, c, n, m, features, idx, output)
+        pointops_cuda_repsurf.gathering_forward_cuda(b, c, n, m, features, idx, output)
         ctx.for_backwards = (idx, c, n)
         return output
 
@@ -76,7 +76,7 @@ class Gathering(Function):
         b, m = idx.size()
         grad_features = torch.cuda.FloatTensor(b, c, n).zero_()
         grad_out_data = grad_out.data.contiguous()
-        pointops_cuda.gathering_backward_cuda(b, c, n, m, grad_out_data, idx, grad_features.data)
+        pointops_cuda_repsurf.gathering_backward_cuda(b, c, n, m, grad_out_data, idx, grad_features.data)
         return grad_features, None
 
 
@@ -98,7 +98,7 @@ class NearestNeighbor(Function):
         m = known.size(1)
         dist2 = torch.cuda.FloatTensor(b, n, 3)
         idx = torch.cuda.IntTensor(b, n, 3)
-        pointops_cuda.nearestneighbor_cuda(b, n, m, unknown, known, dist2, idx)
+        pointops_cuda_repsurf.nearestneighbor_cuda(b, n, m, unknown, known, dist2, idx)
         return torch.sqrt(dist2), idx
 
     @staticmethod
@@ -127,7 +127,7 @@ class Interpolation(Function):
         n = idx.size(1)
         ctx.interpolation_for_backward = (idx, weight, m)
         output = torch.cuda.FloatTensor(b, c, n)
-        pointops_cuda.interpolation_forward_cuda(b, c, m, n, features, idx, weight, output)
+        pointops_cuda_repsurf.interpolation_forward_cuda(b, c, m, n, features, idx, weight, output)
         return output
 
     @staticmethod
@@ -140,7 +140,7 @@ class Interpolation(Function):
         b, c, n = grad_out.size()
         grad_features = torch.cuda.FloatTensor(b, c, m).zero_()
         grad_out_data = grad_out.data.contiguous()
-        pointops_cuda.interpolation_backward_cuda(b, c, n, m, grad_out_data, idx, weight, grad_features.data)
+        pointops_cuda_repsurf.interpolation_backward_cuda(b, c, n, m, grad_out_data, idx, weight, grad_features.data)
         return grad_features, None, None
 
 
@@ -159,7 +159,7 @@ class Grouping(Function):
         b, c, n = features.size()
         _, m, nsample = idx.size()
         output = torch.cuda.FloatTensor(b, c, m, nsample)
-        pointops_cuda.grouping_forward_cuda(b, c, n, m, nsample, features, idx, output)
+        pointops_cuda_repsurf.grouping_forward_cuda(b, c, n, m, nsample, features, idx, output)
         ctx.for_backwards = (idx, n)
         return output
 
@@ -173,7 +173,7 @@ class Grouping(Function):
         b, c, m, nsample = grad_out.size()
         grad_features = torch.cuda.FloatTensor(b, c, n).zero_()
         grad_out_data = grad_out.data.contiguous()
-        pointops_cuda.grouping_backward_cuda(b, c, n, m, nsample, grad_out_data, idx, grad_features.data)
+        pointops_cuda_repsurf.grouping_backward_cuda(b, c, n, m, nsample, grad_out_data, idx, grad_features.data)
         return grad_features, None
 
 
@@ -192,7 +192,7 @@ class GroupingInt(Function):
         b, c, n = features.size()
         _, m, nsample = idx.size()
         output = torch.cuda.LongTensor(b, c, m, nsample)
-        pointops_cuda.grouping_int_forward_cuda(b, c, n, m, nsample, features, idx, output)
+        pointops_cuda_repsurf.grouping_int_forward_cuda(b, c, n, m, nsample, features, idx, output)
         return output
 
     @staticmethod
@@ -218,7 +218,7 @@ class BallQuery(Function):
         b, n, _ = xyz.size()
         m = new_xyz.size(1)
         idx = torch.cuda.IntTensor(b, m, nsample).zero_()
-        pointops_cuda.ballquery_cuda(b, n, m, radius, nsample, new_xyz, xyz, idx)
+        pointops_cuda_repsurf.ballquery_cuda(b, n, m, radius, nsample, new_xyz, xyz, idx)
         return idx
 
     @staticmethod
@@ -312,7 +312,7 @@ class KNNQuery(Function):
         n = xyz.size(1)
         idx = torch.cuda.IntTensor(b, m, nsample).zero_()
         dist2 = torch.cuda.FloatTensor(b, m, nsample).zero_()
-        pointops_cuda.knnquery_cuda(b, n, m, nsample, xyz, new_xyz, idx, dist2)
+        pointops_cuda_repsurf.knnquery_cuda(b, n, m, nsample, xyz, new_xyz, idx, dist2)
         return idx
 
     @staticmethod
@@ -342,7 +342,7 @@ class KNNQuery_Heap(Function):
         n = xyz.size(1)
         idx = torch.cuda.IntTensor(b, m, nsample).zero_()
         dist2 = torch.cuda.FloatTensor(b, m, nsample).zero_()
-        pointops_cuda.knnquery_heap_cuda(b, n, m, nsample, xyz, new_xyz, idx, dist2)
+        pointops_cuda_repsurf.knnquery_heap_cuda(b, n, m, nsample, xyz, new_xyz, idx, dist2)
         ctx.mark_non_differentiable(idx)
         return idx
 

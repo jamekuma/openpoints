@@ -282,7 +282,7 @@ class UmbrellaSurfaceConstructor(nn.Module):
         )
 
     def forward(self, center):
-        center = center.permute(0, 2, 1)
+        # center = center.permute(0, 2, 1)
         # surface construction
         group_xyz = group_by_umbrella(center, center, k=self.k, cuda=self.cuda)  # [B, N, K-1, 3 (points), 3 (coord.)]
 
@@ -312,4 +312,4 @@ class UmbrellaSurfaceConstructor(nn.Module):
         else:
             new_feature = torch.sum(new_feature, 2)
 
-        return new_feature
+        return new_feature  # [B, C, N]

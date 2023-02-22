@@ -11,9 +11,9 @@ os.environ['OPT'] = " ".join(
 )
 
 setup(
-    name='pointops',
+    name='pointops_repsurf',
     ext_modules=[
-        CUDAExtension('pointops_cuda', [
+        CUDAExtension('pointops_cuda_repsurf', [
             'src/pointops_api.cpp',
 
             'src/ballquery/ballquery_cuda.cpp',
