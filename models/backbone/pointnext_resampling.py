@@ -1,3 +1,8 @@
+"""Official implementation of PointNext
+PointNeXt: Revisiting PointNet++ with Improved Training and Scaling Strategies
+https://arxiv.org/abs/2206.04670
+Guocheng Qian, Yuchen Li, Houwen Peng, Jinjie Mai, Hasan Abed Al Kader Hammoud, Mohamed Elhoseiny, Bernard Ghanem
+"""
 from typing import List, Type
 import logging
 import torch
@@ -5,8 +10,7 @@ import torch.nn as nn
 from ..build import MODELS
 from ..layers import create_convblock1d, create_convblock2d, create_act, CHANNEL_MAP, \
     create_grouper, furthest_point_sample, random_sample, three_interpolation, get_aggregation_feautres
-# from .pointnext import InvResMLP, SetAbstraction
-from ..repsurf_utils.repsurface_utils import UmbrellaSurfaceConstructor
+from ..layers.resampler import Resampler
 
 def get_reduction_fn(reduction):
     reduction = 'mean' if reduction.lower() == 'avg' else reduction
@@ -18,6 +22,7 @@ def get_reduction_fn(reduction):
     elif reduction == 'sum':
         pool = lambda x: torch.sum(x, dim=-1, keepdim=False)
     return pool
+
 
 class LocalAggregation(nn.Module):
     """Local aggregation layer for a set 
@@ -73,13 +78,15 @@ class LocalAggregation(nn.Module):
         return f
 
 
+    
+# resampler = Resampler().cuda()
+
 class SetAbstraction(nn.Module):
     """The modified set abstraction module in PointNet++ with residual connection support
     """
 
     def __init__(self,
-                 in_channels, out_channels, 
-                 norm_channels=0,
+                 in_channels, out_channels,
                  layers=1,
                  stride=1,
                  group_args={'NAME': 'ballquery',
@@ -88,6 +95,7 @@ class SetAbstraction(nn.Module):
                  act_args={'act': 'relu'},
                  conv_args=None,
                  sampler='fps',
+                 resampler=None,
                  feature_type='dp_fj',
                  use_res=False,
                  is_head=False,
@@ -99,7 +107,7 @@ class SetAbstraction(nn.Module):
         self.all_aggr = not is_head and stride == 1
         self.use_res = use_res and not self.all_aggr and not self.is_head
         self.feature_type = feature_type
-        in_channels += norm_channels
+
         mid_channel = out_channels // 2 if stride > 1 else out_channels
         channels = [in_channels] + [mid_channel] * \
                    (layers - 1) + [out_channels]
@@ -132,10 +140,9 @@ class SetAbstraction(nn.Module):
                 self.sample_fn = furthest_point_sample
             elif sampler.lower() == 'random':
                 self.sample_fn = random_sample
-    def forward(self, pfn):
-        p, f, normal = pfn
-        f = torch.cat([f, normal.clone()], dim=1)
-        idx = None      # sampling idx
+        self.resampler = resampler
+    def forward(self, pf):
+        p, f = pf
         if self.is_head:
             f = self.convs(f)  # (n, c)
         else:
@@ -158,21 +165,78 @@ class SetAbstraction(nn.Module):
                     identity = self.skipconv(fi)
             else:
                 fi = None
+            # f: [B, C, N], p: [B, N, 3], new_p: [B, S, 3]
+            new_p, delta_new_p = self.resampler(p, new_p)
             dp, fj = self.grouper(new_p, p, f)
             fj = get_aggregation_feautres(new_p, dp, fi, fj, feature_type=self.feature_type)
-            f = self.pool(self.convs(fj))
+            fj_feat = self.convs(fj)        # [B, C, S, G]
+            f = self.pool(fj_feat)
             if self.use_res:
                 f = self.act(f + identity)
-            p = new_p
-        if idx is not None:
-            normal = torch.gather(
-                    normal, -1, idx.unsqueeze(1).expand(-1, normal.shape[1], -1))
-        return p, f, normal
+            # new_p, delta_new_p = resampler(p, new_p)
+            p = new_p       # [B, S, 3]
+        return p, f
+
+
+class FeaturePropogation(nn.Module):
+    """The Feature Propogation module in PointNet++
+    """
+
+    def __init__(self, mlp,
+                 upsample=True,
+                 norm_args={'norm': 'bn1d'},
+                 act_args={'act': 'relu'}
+                 ):
+        """
+        Args:
+            mlp: [current_channels, next_channels, next_channels]
+            out_channels:
+            norm_args:
+            act_args:
+        """
+        super().__init__()
+        if not upsample:
+            self.linear2 = nn.Sequential(
+                nn.Linear(mlp[0], mlp[1]), nn.ReLU(inplace=True))
+            mlp[1] *= 2
+            linear1 = []
+            for i in range(1, len(mlp) - 1):
+                linear1.append(create_convblock1d(mlp[i], mlp[i + 1],
+                                                  norm_args=norm_args, act_args=act_args
+                                                  ))
+            self.linear1 = nn.Sequential(*linear1)
+        else:
+            convs = []
+            for i in range(len(mlp) - 1):
+                convs.append(create_convblock1d(mlp[i], mlp[i + 1],
+                                                norm_args=norm_args, act_args=act_args
+                                                ))
+            self.convs = nn.Sequential(*convs)
+
+        self.pool = lambda x: torch.mean(x, dim=-1, keepdim=False)
+
+    def forward(self, pf1, pf2=None):
+        # pfb1 is with the same size of upsampled points
+        if pf2 is None:
+            _, f = pf1  # (B, N, 3), (B, C, N)
+            f_global = self.pool(f)
+            f = torch.cat(
+                (f, self.linear2(f_global).unsqueeze(-1).expand(-1, -1, f.shape[-1])), dim=1)
+            f = self.linear1(f)
+        else:
+            p1, f1 = pf1
+            p2, f2 = pf2
+            if f1 is not None:
+                f = self.convs(
+                    torch.cat((f1, three_interpolation(p1, p2, f2)), dim=1))
+            else:
+                f = self.convs(three_interpolation(p1, p2, f2))
+        return f
+
 
 class InvResMLP(nn.Module):
     def __init__(self,
-                 in_channels, 
-                 norm_channels=0,
+                 in_channels,
                  norm_args=None,
                  act_args=None,
                  aggr_args={'feature_type': 'dp_fj', "reduction": 'max'},
@@ -186,7 +250,6 @@ class InvResMLP(nn.Module):
                  ):
         super().__init__()
         self.use_res = use_res
-        in_channels += norm_channels
         mid_channels = int(in_channels * expansion)
         self.convs = LocalAggregation([in_channels, in_channels],
                                       norm_args=norm_args, act_args=act_args if num_posconvs > 0 else None,
@@ -210,19 +273,50 @@ class InvResMLP(nn.Module):
         self.pwconv = nn.Sequential(*pwconv)
         self.act = create_act(act_args)
 
-    def forward(self, pfn):
-        p, f, normal = pfn
-        f = torch.cat([f, normal.clone()], dim=1)
+    def forward(self, pf):
+        p, f = pf
         identity = f
         f = self.convs([p, f])
         f = self.pwconv(f)
         if f.shape[-1] == identity.shape[-1] and self.use_res:
             f += identity
         f = self.act(f)
-        return p, f, normal
+        return [p, f]
+
+
+class ResBlock(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 norm_args=None,
+                 act_args=None,
+                 aggr_args={'feature_type': 'dp_fj', "reduction": 'max'},
+                 group_args={'NAME': 'ballquery'},
+                 conv_args=None,
+                 expansion=1,
+                 use_res=True,
+                 **kwargs
+                 ):
+        super().__init__()
+        self.use_res = use_res
+        mid_channels = in_channels * expansion
+        self.convs = LocalAggregation([in_channels, in_channels, mid_channels, in_channels],
+                                      norm_args=norm_args, act_args=None,
+                                      group_args=group_args, conv_args=conv_args,
+                                      **aggr_args, **kwargs)
+        self.act = create_act(act_args)
+
+    def forward(self, pf):
+        p, f = pf
+        identity = f
+        f = self.convs([p, f])
+        if f.shape[-1] == identity.shape[-1] and self.use_res:
+            f += identity
+        f = self.act(f)
+        return [p, f]
+
 
 @MODELS.register_module()
-class PointNextEncoder_Repsurf(nn.Module):
+class PointNextEncoder_Resampling(nn.Module):
     r"""The Encoder for PointNext 
     `"PointNeXt: Revisiting PointNet++ with Improved Training and Scaling Strategies".
     <https://arxiv.org/abs/2206.04670>`_.
@@ -277,14 +371,11 @@ class PointNextEncoder_Repsurf(nn.Module):
         self.use_res = kwargs.get('use_res', True)
         radius_scaling = kwargs.get('radius_scaling', 2)
         nsample_scaling = kwargs.get('nsample_scaling', 1)
+        self.resampler = Resampler()
 
         self.radii = self._to_full_list(radius, radius_scaling)
         self.nsample = self._to_full_list(nsample, nsample_scaling)
         logging.info(f'radius: {self.radii},\n nsample: {self.nsample}')
-
-        self.surface_constructor = UmbrellaSurfaceConstructor(kwargs.get('group_size', 8) + 1, kwargs.get('norm_channels', 10),
-                                                              return_dist=kwargs.get('return_dist', True), aggr_type=kwargs.get('umb_pool', 'sum'),
-                                                              cuda=kwargs.get('cuda_ops', True))
 
         # double width after downsampling.
         channels = []
@@ -298,7 +389,7 @@ class PointNextEncoder_Repsurf(nn.Module):
             group_args.nsample = self.nsample[i]
             encoder.append(self._make_enc(
                 block, channels[i], blocks[i], stride=strides[i], group_args=group_args,
-                is_head=i == 0 and strides[i] == 1, norm_channels=kwargs.get('norm_channels', 10)
+                is_head=i == 0 and strides[i] == 1
             ))
         self.encoder = nn.Sequential(*encoder)
         self.out_channels = channels[-1]
@@ -324,16 +415,17 @@ class PointNextEncoder_Repsurf(nn.Module):
                     param *= param_scaling
         return param_list
 
-    def _make_enc(self, block, channels, blocks, stride, group_args, is_head=False, norm_channels=0):
+    def _make_enc(self, block, channels, blocks, stride, group_args, is_head=False):
         layers = []
         radii = group_args.radius
         nsample = group_args.nsample
         group_args.radius = radii[0]
         group_args.nsample = nsample[0]
-        layers.append(SetAbstraction(self.in_channels, channels, norm_channels,
+        layers.append(SetAbstraction(self.in_channels, channels,
                                      self.sa_layers if not is_head else 1, stride,
                                      group_args=group_args,
                                      sampler=self.sampler,
+                                     resampler=self.resampler, 
                                      norm_args=self.norm_args, act_args=self.act_args, conv_args=self.conv_args,
                                      is_head=is_head, use_res=self.sa_use_res, **self.aggr_args 
                                      ))
@@ -341,7 +433,7 @@ class PointNextEncoder_Repsurf(nn.Module):
         for i in range(1, blocks):
             group_args.radius = radii[i]
             group_args.nsample = nsample[i]
-            layers.append(block(self.in_channels, norm_channels,
+            layers.append(block(self.in_channels,
                                 aggr_args=self.aggr_args,
                                 norm_args=self.norm_args, act_args=self.act_args, group_args=group_args,
                                 conv_args=self.conv_args, expansion=self.expansion,
@@ -352,15 +444,13 @@ class PointNextEncoder_Repsurf(nn.Module):
     def forward_cls_feat(self, p0, f0=None):
         if hasattr(p0, 'keys'):
             p0, f0 = p0['pos'], p0.get('x', None)
-        # p0: (B, N, 3), f0: (B, C=4, N)
-        normal = self.surface_constructor(p0)       # normal: (B, C=10, N)
         if f0 is None:
             f0 = p0.clone().transpose(1, 2).contiguous()
         for i in range(0, len(self.encoder)):
-            p0, f0, normal = self.encoder[i]([p0, f0, normal])
-        return f0.squeeze(-1)
+            p0, f0 = self.encoder[i]([p0, f0])
+        return f0.squeeze(-1), self.resampler.get_loss()
 
-    def forward_seg_feat(self, p0, f0=None):    # TODO
+    def forward_seg_feat(self, p0, f0=None):
         if hasattr(p0, 'keys'):
             p0, f0 = p0['pos'], p0.get('x', None)
         if f0 is None:

@@ -38,6 +38,37 @@ class BaseCls(nn.Module):
         logits = self.forward(data)
         return logits, self.criterion(logits, gt.long())
 
+@MODELS.register_module()
+class BaseCls_Resampling(nn.Module):
+    def __init__(self,
+                 encoder_args=None,
+                 cls_args=None,
+                 criterion_args=None,
+                 **kwargs):
+        super().__init__()
+        assert "Resampling" in encoder_args.NAME
+        self.encoder = build_model_from_cfg(encoder_args)
+
+        if cls_args is not None:
+            in_channels = self.encoder.out_channels if hasattr(self.encoder, 'out_channels') else cls_args.get('in_channels', None)
+            cls_args.in_channels = in_channels
+            self.prediction = build_model_from_cfg(cls_args)
+        else:
+            self.prediction = nn.Identity()
+        self.criterion = build_criterion_from_cfg(criterion_args) if criterion_args is not None else None
+        self.move_loss = 0
+        self.move_loss_coef = kwargs.get('move_loss_coef', 0)
+        print(f'move_loss_coef = {self.move_loss_coef}')
+    def forward(self, data):
+        global_feat, self.move_loss = self.encoder.forward_cls_feat(data)
+        return self.prediction(global_feat)
+
+    def get_loss(self, pred, gt, inputs=None):
+        return self.criterion(pred, gt.long()) + self.move_loss_coef * self.move_loss
+
+    def get_logits_loss(self, data, gt):
+        logits = self.forward(data)
+        return logits, self.criterion(logits, gt.long()) + self.move_loss_coef * self.move_loss, self.move_loss
 
 @MODELS.register_module()
 class DistillCls(BaseCls):

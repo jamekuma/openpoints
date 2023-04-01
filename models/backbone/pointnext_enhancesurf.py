@@ -7,6 +7,7 @@ from ..layers import create_convblock1d, create_convblock2d, create_act, CHANNEL
     create_grouper, furthest_point_sample, random_sample, three_interpolation, get_aggregation_feautres
 # from .pointnext import InvResMLP, SetAbstraction
 from ..repsurf_utils.repsurface_utils import UmbrellaSurfaceConstructor
+from ..repsurf_utils.enhancesurf_utils_v2 import EnhanceSurfaceConstructor
 
 def get_reduction_fn(reduction):
     reduction = 'mean' if reduction.lower() == 'avg' else reduction
@@ -222,7 +223,7 @@ class InvResMLP(nn.Module):
         return p, f, normal
 
 @MODELS.register_module()
-class PointNextEncoder_Repsurf(nn.Module):
+class PointNextEncoder_Enhancesurf(nn.Module):
     r"""The Encoder for PointNext 
     `"PointNeXt: Revisiting PointNet++ with Improved Training and Scaling Strategies".
     <https://arxiv.org/abs/2206.04670>`_.
@@ -282,9 +283,9 @@ class PointNextEncoder_Repsurf(nn.Module):
         self.nsample = self._to_full_list(nsample, nsample_scaling)
         logging.info(f'radius: {self.radii},\n nsample: {self.nsample}')
 
-        self.surface_constructor = UmbrellaSurfaceConstructor(kwargs.get('group_size', 8) + 1, kwargs.get('norm_channels', 10),
-                                                              return_dist=kwargs.get('return_dist', True), aggr_type=kwargs.get('umb_pool', 'sum'),
-                                                              cuda=kwargs.get('cuda_ops', True))
+        self.surface_constructor = EnhanceSurfaceConstructor(kwargs.get('group_size', 8) + 1, kwargs.get('norm_channels', 12), 
+                                        aggr_type=kwargs.get('umb_pool', 'sum'), random_inv=kwargs.get('random_inv', False), 
+                                        weighted=kwargs.get('weighted', True), temperature=kwargs.get('temperature', 5))
 
         # double width after downsampling.
         channels = []
@@ -298,7 +299,7 @@ class PointNextEncoder_Repsurf(nn.Module):
             group_args.nsample = self.nsample[i]
             encoder.append(self._make_enc(
                 block, channels[i], blocks[i], stride=strides[i], group_args=group_args,
-                is_head=i == 0 and strides[i] == 1, norm_channels=kwargs.get('norm_channels', 10)
+                is_head=i == 0 and strides[i] == 1, norm_channels=kwargs.get('norm_channels', 12)
             ))
         self.encoder = nn.Sequential(*encoder)
         self.out_channels = channels[-1]
@@ -353,7 +354,7 @@ class PointNextEncoder_Repsurf(nn.Module):
         if hasattr(p0, 'keys'):
             p0, f0 = p0['pos'], p0.get('x', None)
         # p0: (B, N, 3), f0: (B, C=4, N)
-        normal = self.surface_constructor(p0)       # normal: (B, C=10, N)
+        normal = self.surface_constructor(p0)       # normal: (B, C=12, N)
         if f0 is None:
             f0 = p0.clone().transpose(1, 2).contiguous()
         for i in range(0, len(self.encoder)):
