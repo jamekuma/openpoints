@@ -56,19 +56,18 @@ class BaseCls_Resampling(nn.Module):
         else:
             self.prediction = nn.Identity()
         self.criterion = build_criterion_from_cfg(criterion_args) if criterion_args is not None else None
-        self.move_loss = 0
-        self.move_loss_coef = kwargs.get('move_loss_coef', 0)
-        print(f'move_loss_coef = {self.move_loss_coef}')
+        self.resampler_loss = 0
+
     def forward(self, data):
-        global_feat, self.move_loss = self.encoder.forward_cls_feat(data)
+        global_feat, self.resampler_loss = self.encoder.forward_cls_feat(data)
         return self.prediction(global_feat)
 
     def get_loss(self, pred, gt, inputs=None):
-        return self.criterion(pred, gt.long()) + self.move_loss_coef * self.move_loss
+        return self.criterion(pred, gt.long()) + self.resampler_loss
 
     def get_logits_loss(self, data, gt):
         logits = self.forward(data)
-        return logits, self.criterion(logits, gt.long()) + self.move_loss_coef * self.move_loss, self.move_loss
+        return logits, self.criterion(logits, gt.long()) + self.resampler_loss, self.resampler_loss
 
 @MODELS.register_module()
 class DistillCls(BaseCls):

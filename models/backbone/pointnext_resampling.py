@@ -7,7 +7,7 @@ from typing import List, Type
 import logging
 import torch
 import torch.nn as nn
-from ..build import MODELS
+from ..build import MODELS, build_model_from_cfg
 from ..layers import create_convblock1d, create_convblock2d, create_act, CHANNEL_MAP, \
     create_grouper, furthest_point_sample, random_sample, three_interpolation, get_aggregation_feautres
 from ..layers.resampler import Resampler
@@ -166,14 +166,19 @@ class SetAbstraction(nn.Module):
             else:
                 fi = None
             # f: [B, C, N], p: [B, N, 3], new_p: [B, S, 3]
+            # from openpoints.utils.vis import save_points_obj
+            # save_points_obj(new_p[0], "before.obj")
             new_p, delta_new_p = self.resampler(p, new_p)
+            # save_points_obj(delta_new_p[0], "delta.obj")
+            # save_points_obj(new_p[0], "after.obj")
+            # exit(0)
             dp, fj = self.grouper(new_p, p, f)
             fj = get_aggregation_feautres(new_p, dp, fi, fj, feature_type=self.feature_type)
             fj_feat = self.convs(fj)        # [B, C, S, G]
             f = self.pool(fj_feat)
             if self.use_res:
                 f = self.act(f + identity)
-            # new_p, delta_new_p = resampler(p, new_p)
+            # new_p, delta_new_p = self.resampler(p, new_p)
             p = new_p       # [B, S, 3]
         return p, f
 
@@ -371,7 +376,11 @@ class PointNextEncoder_Resampling(nn.Module):
         self.use_res = kwargs.get('use_res', True)
         radius_scaling = kwargs.get('radius_scaling', 2)
         nsample_scaling = kwargs.get('nsample_scaling', 1)
-        self.resampler = Resampler()
+
+        resampler_args = kwargs.get('resampler_args', None)
+        assert resampler_args is not None
+        # self.resampler = Resampler()
+        self.resampler = build_model_from_cfg(resampler_args)
 
         self.radii = self._to_full_list(radius, radius_scaling)
         self.nsample = self._to_full_list(nsample, nsample_scaling)

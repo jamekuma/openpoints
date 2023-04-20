@@ -12,3 +12,4 @@ from .subsample import random_sample, furthest_point_sample, fps # grid_subsampl
 from .upsampling import three_interpolate, three_nn, three_interpolation
 from .attention import TransformerEncoder
 from .local_aggregation import LocalAggregation, CHANNEL_MAP
+from .resampler import Resampler, Resampler_v2

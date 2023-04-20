@@ -16,7 +16,7 @@ from ..layers import furthest_point_sample, random_sample, LocalAggregation, cre
     three_nn, gather_operation, create_linearblock, create_convblock1d, create_grouper
 import logging
 import copy
-from ..build import MODELS
+from ..build import MODELS, build_model_from_cfg
 from ..layers import furthest_point_sample, fps
 from ..layers.group import QueryAndGroup
 import torch
@@ -177,7 +177,12 @@ class LocalGrouper(nn.Module):
         fps_idx = furthest_point_sample(xyz, S).long()  # [B, npoint]
         new_xyz = index_points(xyz, fps_idx)  # [B, npoint, 3]
         new_points = index_points(points, fps_idx)  # [B, npoint, d]
+        # from openpoints.utils.vis import save_points_obj
+        # save_points_obj(new_xyz[0], "before.obj")
         new_xyz, delta_new_xyz = self.resampler(xyz, new_xyz)
+        # save_points_obj(delta_new_xyz[0], "delta.obj")
+        # save_points_obj(new_xyz[0], "after.obj")
+        # exit(0)
         idx = knn_point(self.kneighbors, xyz, new_xyz)
         grouped_xyz = index_points(xyz, idx)  # [B, npoint, k, 3]
         grouped_points = index_points(points, idx)  # [B, npoint, k, d]
@@ -308,7 +313,10 @@ class PointMLPEncoder_Resampling(nn.Module):
         self.pre_blocks_list = nn.ModuleList()
         self.pos_blocks_list = nn.ModuleList()
         last_channel = embed_dim
-        self.resampler = Resampler()
+        resampler_args = kwargs.get('resampler_args', None)
+        assert resampler_args is not None
+        # self.resampler = Resampler()
+        self.resampler = build_model_from_cfg(resampler_args)
         for i in range(len(pre_blocks)):
             out_channel = last_channel * dim_expansion[i]
             pre_block_num = pre_blocks[i]
